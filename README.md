@@ -1,4 +1,5 @@
 # Failsafe Supervisor
+![ci](https://github.com/abgocmez/failsafe_supervisor/actions/workflows/ci.yml/badge.svg)
 
 Bir Linux edge cihazinda (Raspberry Pi 3 B+) calisan, isci proseslerini
 paylasimli-bellek heartbeatleri uzerinden denetleyen, kacirilan deadlineleri

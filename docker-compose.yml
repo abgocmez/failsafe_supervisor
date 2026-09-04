@@ -1,0 +1,29 @@
+# Two-container demo of the spawn-vs-attach asymmetry.
+#   supervisor      : owns plant/controller/logger (spawned) + monitors an
+#                     external worker on slot 3. Creates the shared region.
+#   external-worker : a separate container attaching to slot 3 over a shared
+#                     /dev/shm (ipc: service:supervisor). The supervisor cannot
+#                     crash-detect or restart it -- only detect via deadline and
+#                     escalate. That is the point: containers isolate exactly what
+#                     a supervisor needs to see across.
+services:
+  supervisor:
+    build: .
+    image: failsafe-supervisor:latest
+    command: ["supervisor"]
+    environment:
+      - FAILSAFE_SHM_NAME=/failsafe_main
+      - FAILSAFE_EXTERNAL=1
+      # External workers cross a container boundary, so they get a more lenient
+      # deadline than the in-process owned workers (100 ms).
+      - FAILSAFE_EXTERNAL_DEADLINE_MS=500
+    ipc: shareable
+    init: true
+
+  external-worker:
+    image: failsafe-supervisor:latest
+    command: ["worker", "/failsafe_main", "3", "100", "fsw-external"]
+    ipc: "service:supervisor"
+    depends_on:
+      - supervisor
+    init: true

@@ -108,6 +108,17 @@ void handle_failure(failsafe::Worker& w, failsafe::DetectPath path,
   w.state = WorkerState::Failed;
   w.armed = false;
 
+  // External workers cannot be restarted (we did not spawn them); a failure is
+  // unrecoverable by definition and escalates immediately -- strictly weaker
+  // than an owned worker, which is the whole point of the container demo.
+  if (w.spec.external) {
+    w.state = WorkerState::GaveUp;
+    std::printf("EV %llu GAVEUP %s\n", (unsigned long long)now, w.spec.name.c_str());
+    std::printf("[policy] external worker %s cannot be restarted -> ESCALATE\n",
+                w.spec.name.c_str());
+    return;
+  }
+
   while (!w.restart_times.empty() &&
          now - w.restart_times.front() > w.spec.window_ns) {
     w.restart_times.pop_front();
@@ -148,8 +159,17 @@ int main(int argc, char** argv) {
   // injections without tripping escalation (latency measurement, not policy).
   const char* mr_env = std::getenv("FAILSAFE_MAX_RESTARTS");
   const int max_restarts = mr_env ? std::atoi(mr_env) : 3;
+  // Number of external (attach-only) workers to monitor, e.g. one in another
+  // container. They are not spawned and cannot be restarted.
+  const char* ext_env = std::getenv("FAILSAFE_EXTERNAL");
+  const int n_external = ext_env ? std::atoi(ext_env) : 0;
+  // External workers are expectedly higher-latency (another container / host),
+  // so they get a more lenient deadline than owned in-process workers.
+  const char* ed_env = std::getenv("FAILSAFE_EXTERNAL_DEADLINE_MS");
+  const std::uint64_t ext_deadline_ns =
+      (ed_env ? std::strtoull(ed_env, nullptr, 10) : 300ull) * 1000000ull;
 
-  std::vector<failsafe::Worker> workers(3);
+  std::vector<failsafe::Worker> workers(3 + n_external);
   const char* names[3] = {"plant", "controller", "logger"};
   for (unsigned i = 0; i < 3; ++i) {
     workers[i].spec.name = names[i];
@@ -158,6 +178,14 @@ int main(int argc, char** argv) {
     workers[i].spec.deadline_ns = 100000000ull;
     workers[i].spec.max_restarts = max_restarts;
     workers[i].spec.window_ns = 10000000000ull;
+  }
+  for (int e = 0; e < n_external; ++e) {
+    auto& w = workers[3 + e];
+    w.spec.name = "external" + std::to_string(e);
+    w.spec.slot = 3 + e;
+    w.spec.period_ms = 100;
+    w.spec.deadline_ns = ext_deadline_ns;
+    w.spec.external = true;  // monitor only: no spawn, no restart
   }
 
   sigset_t mask;
@@ -170,12 +198,15 @@ int main(int argc, char** argv) {
   const int sfd = ::signalfd(-1, &mask, SFD_NONBLOCK | SFD_CLOEXEC);
   if (sfd < 0) { std::perror("signalfd"); return 2; }
 
-  g_shm_name = "/failsafe_" + std::to_string(::getpid());
+  // Fixed name lets an external worker in another container open the same region.
+  const char* shm_env = std::getenv("FAILSAFE_SHM_NAME");
+  g_shm_name = shm_env ? shm_env : ("/failsafe_" + std::to_string(::getpid()));
   ::shm_unlink(g_shm_name.c_str());
   auto shm = failsafe::SharedMemory::create(g_shm_name);
   shm.region()->slot_count.store(workers.size(), std::memory_order_relaxed);
 
-  for (auto& w : workers) spawn(w);
+  for (auto& w : workers)
+    if (!w.spec.external) spawn(w);  // external workers attach on their own
 
   auto io = failsafe::make_safety_io();
   const int tfd = ::timerfd_create(CLOCK_MONOTONIC, TFD_CLOEXEC);
@@ -239,6 +270,7 @@ int main(int argc, char** argv) {
             shm.region()->slots[w.spec.slot].try_read(s, ts) && s > 0) {
           if (!w.armed) {
             w.armed = true;
+            w.ever_armed = true;
             w.consecutive = 0;
             if (w.state == failsafe::WorkerState::Starting) {
               w.state = failsafe::WorkerState::Alive;
@@ -264,6 +296,9 @@ int main(int argc, char** argv) {
       // Aggregate worker view.
       bool any_gaveup = false, all_alive = true;
       for (const auto& w : workers) {
+        // An external worker that has never attached is not counted -- the
+        // system can run before a remote worker connects.
+        if (w.spec.external && !w.ever_armed) continue;
         if (w.state == failsafe::WorkerState::GaveUp) any_gaveup = true;
         if (w.state != failsafe::WorkerState::Alive) all_alive = false;
       }

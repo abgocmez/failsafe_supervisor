@@ -16,7 +16,7 @@ Goal: inject faults systematically and measure recovery latency per fault class.
 - [x] M3 — state machines + latched safe state (logic, CI, and on-Pi LED/button verified)
 - [x] M4 — hardware watchdog (BCM /dev/watchdog; SIGSTOP supervisor -> Pi reboots, verified)
 - [x] M5 — fault injection + measurement (3 classes x100; CSV + chart)
-- [ ] M6 — containers
+- [x] M6 — containers (Docker Compose; spawn-vs-attach asymmetry)
 
 ## Results
 
@@ -74,6 +74,43 @@ stays portable and the hardware layer sits behind a compile-time switch.
 - **Lock-free heartbeat.** The heartbeat record is two 64-bit atomics, which are
   natively lock-free on aarch64. \`sanity\` asserts this at run time; a 32-bit
   image would silently break the "lock-free" claim.
+
+
+## Containers (spawn vs attach)
+
+`docker compose up` runs two containers:
+
+- **supervisor** -- owns `plant`/`controller`/`logger` (spawned via fork/exec)
+  and creates the shared-memory region; it also monitors one *external* worker.
+- **external-worker** -- a separate container that attaches to the region over a
+  shared `/dev/shm` (`ipc: "service:supervisor"`) and publishes into slot 3.
+
+The point is the **asymmetry**, which the supervisor makes explicit:
+
+| | owned worker | external worker |
+|---|---|---|
+| spawned by supervisor | yes (fork/exec) | no (attaches) |
+| crash detection | SIGCHLD (~1 ms) | none |
+| silent detection | deadline | deadline (more lenient) |
+| on failure | restart, then escalate | escalate immediately |
+
+Stopping the external worker's container is detected only via its deadline and
+escalates straight to safe state, because the supervisor cannot restart a
+process it did not spawn:
+
+```
+docker compose stop external-worker
+# supervisor: EV ... DETECT_DEADLINE external0 (age~504ms)
+#             external worker external0 cannot be restarted -> ESCALATE
+#             [SYSTEM] Running -> SafeState
+```
+
+Containers isolate exactly the things a supervisor needs to see across (process
+lifecycle, signals, memory); sharing `/dev/shm` and giving external workers a
+more lenient deadline is the cost of that isolation. The asymmetry is covered by
+`m6_smoke` in CI without Docker. The container image builds off-target
+(`HAVE_GPIO=OFF`, `LogSafetyIo`); GPIO and the watchdog are host-only.
+
 
 ## Out of scope (deliberate)
 Two-node failover is out of scope: with two nodes you cannot form a quorum, so a

@@ -32,6 +32,11 @@ struct WorkerSpec {
   std::uint64_t deadline_ns = 100000000ull;   // miss threshold (100 ms)
   int max_restarts = 3;                       // budget within the window
   std::uint64_t window_ns = 10000000000ull;   // 10 s sliding window
+  // External workers are NOT spawned by the supervisor -- they attach to the
+  // shared region from elsewhere (e.g. another container). They can only be
+  // monitored via the deadline; they cannot be crash-detected (no SIGCHLD) or
+  // restarted. A missed deadline therefore escalates straight to safe state.
+  bool external = false;
 };
 
 struct Worker {
@@ -40,6 +45,7 @@ struct Worker {
   pid_t pid = -1;
   WorkerState state = WorkerState::Starting;
   bool armed = false;                 // seen at least one beat since (re)start
+  bool ever_armed = false;            // has ever attached (matters for external)
   std::uint64_t last_seq = 0;
   std::uint64_t spawn_mono_ns = 0;    // when the current instance was exec-ed
 

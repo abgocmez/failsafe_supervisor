@@ -37,3 +37,10 @@ add_test(NAME m3_smoke
           ${CMAKE_CURRENT_SOURCE_DIR}/m3_smoke.sh $<TARGET_FILE:supervisor>)
 set_tests_properties(m3_smoke PROPERTIES
   PASS_REGULAR_EXPRESSION "m3_smoke OK" TIMEOUT 40)
+
+# M6: external-worker asymmetry (owned restarts; external escalates). No Docker.
+add_test(NAME m6_smoke
+  COMMAND ${CMAKE_COMMAND} -E env bash
+          ${CMAKE_CURRENT_SOURCE_DIR}/m6_smoke.sh $<TARGET_FILE:supervisor> $<TARGET_FILE:worker>)
+set_tests_properties(m6_smoke PROPERTIES
+  PASS_REGULAR_EXPRESSION "m6_smoke OK" TIMEOUT 40)

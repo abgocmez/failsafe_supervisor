@@ -11,6 +11,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <exception>
 
 #include "failsafe/clock.hpp"
 #include "failsafe/shared_memory.hpp"
@@ -39,12 +40,28 @@ int main(int argc, char** argv) {
   std::signal(SIGINT, on_term);
   std::signal(SIGUSR1, on_stall);  // inject a transient heartbeat stall
 
-  // If the supervisor dies, the kernel sends us SIGTERM so we do not linger as
-  // an orphan. Re-check in case the parent already died before this call.
+  // If the parent that spawned us dies, the kernel sends us SIGTERM so we do
+  // not linger as an orphan. (For a standalone/external worker the parent is the
+  // container init, which is fine -- we simply run until stopped.) We must NOT
+  // exit merely because getppid()==1: under a container init that is our normal,
+  // legitimate parent.
   ::prctl(PR_SET_PDEATHSIG, SIGTERM, 0, 0, 0);
-  if (::getppid() == 1) return 0;
 
-  auto shm = failsafe::SharedMemory::open(shm_name);
+  // Retry the open: an external worker may start before the supervisor has
+  // created the shared region (container startup ordering).
+  auto open_with_retry = [&]() {
+    for (int i = 0; i < 100; ++i) {
+      try {
+        return failsafe::SharedMemory::open(shm_name);
+      } catch (const std::exception&) {
+        timespec s{};
+        s.tv_nsec = 100000000L;  // 100 ms
+        ::nanosleep(&s, nullptr);
+      }
+    }
+    return failsafe::SharedMemory::open(shm_name);  // final attempt; let it throw
+  };
+  auto shm = open_with_retry();
   auto& hb = shm.region()->slots[slot];
 
   const long period_ns = period_ms * 1000000L;

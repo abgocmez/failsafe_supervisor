@@ -18,6 +18,12 @@ if(ENABLE_ASAN)
   add_link_options(-fsanitize=address,undefined)
 endif()
 
+option(ENABLE_TSAN "ThreadSanitizer" OFF)
+if(ENABLE_TSAN)
+  add_compile_options(-fsanitize=thread -fno-omit-frame-pointer)
+  add_link_options(-fsanitize=thread)
+endif()
+
 # --- Hardware backend: OFF off-target (CI), which selects the no-op path ---
 # BCM watchdog / gpiod are compiled only for the real Pi target, so the code
 # base still builds on x86_64 CI where no such hardware exists.
@@ -27,6 +33,13 @@ if(HAVE_GPIO)
   pkg_check_modules(GPIODCXX REQUIRED IMPORTED_TARGET libgpiodcxx>=2.0)
   add_compile_definitions(HAVE_GPIO=1)
 endif()
+
+# Header-only core shared by targets and tests.
+add_library(failsafe_headers INTERFACE)
+target_include_directories(failsafe_headers INTERFACE ${CMAKE_SOURCE_DIR}/include)
+
+# Threads for the concurrency tests.
+find_package(Threads REQUIRED)
 
 enable_testing()
 add_subdirectory(src)

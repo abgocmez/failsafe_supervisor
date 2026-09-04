@@ -1,8 +1,10 @@
-// A supervised worker (M1: well-behaved only). It opens the shared region,
+// A supervised worker (M1/M2: well-behaved only). It opens the shared region,
 // takes its slot index, and publishes a heartbeat every period using absolute
 // CLOCK_MONOTONIC wakeups (clock_nanosleep TIMER_ABSTIME) so the cadence does
 // not drift. Later milestones add misbehaviour modes (stall, crash, babble).
-//   argv: worker <shm_name> <slot_index> [period_ms]
+//   argv: worker <shm_name> <slot_index> [period_ms] [name]
+#include <sys/prctl.h>
+
 #include <csignal>
 #include <cstdint>
 #include <cstdio>
@@ -19,17 +21,25 @@ void on_term(int) { g_run = 0; }
 }  // namespace
 
 int main(int argc, char** argv) {
+  std::setvbuf(stdout, nullptr, _IOLBF, 0);
   if (argc < 3) {
-    std::fprintf(stderr, "usage: %s <shm_name> <slot_index> [period_ms]\n", argv[0]);
+    std::fprintf(stderr, "usage: %s <shm_name> <slot_index> [period_ms] [name]\n", argv[0]);
     return 2;
   }
-  std::setvbuf(stdout, nullptr, _IOLBF, 0);
   const std::string shm_name = argv[1];
   const unsigned slot = static_cast<unsigned>(std::strtoul(argv[2], nullptr, 10));
   const long period_ms = (argc > 3) ? std::strtol(argv[3], nullptr, 10) : 100;
 
+  // Distinct process name so tools (ps/top/pgrep -x) can target one worker.
+  if (argc > 4) ::prctl(PR_SET_NAME, argv[4], 0, 0, 0);
+
   std::signal(SIGTERM, on_term);
   std::signal(SIGINT, on_term);
+
+  // If the supervisor dies, the kernel sends us SIGTERM so we do not linger as
+  // an orphan. Re-check in case the parent already died before this call.
+  ::prctl(PR_SET_PDEATHSIG, SIGTERM, 0, 0, 0);
+  if (::getppid() == 1) return 0;
 
   auto shm = failsafe::SharedMemory::open(shm_name);
   auto& hb = shm.region()->slots[slot];

@@ -22,4 +22,11 @@ add_test(NAME m1_smoke
   COMMAND ${CMAKE_COMMAND} -E env bash
           ${CMAKE_CURRENT_SOURCE_DIR}/m1_smoke.sh $<TARGET_FILE:supervisor>)
 set_tests_properties(m1_smoke PROPERTIES
-  PASS_REGULAR_EXPRESSION "m1_smoke OK" TIMEOUT 30)
+  PASS_REGULAR_EXPRESSION "deadline_detect OK" TIMEOUT 30)
+
+# M2 integration: restart recovery + budget escalation (spawns supervisor).
+add_test(NAME m2_smoke
+  COMMAND ${CMAKE_COMMAND} -E env bash
+          ${CMAKE_CURRENT_SOURCE_DIR}/m2_smoke.sh $<TARGET_FILE:supervisor>)
+set_tests_properties(m2_smoke PROPERTIES
+  PASS_REGULAR_EXPRESSION "m2_smoke OK" TIMEOUT 40)

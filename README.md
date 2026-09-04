@@ -9,6 +9,83 @@ cannot be recovered, drives the system into a defined **safe state**.
 
 Goal: inject faults systematically and measure recovery latency per fault class.
 
+## How it works
+
+```mermaid
+flowchart TB
+    W1["plant"]:::wk
+    W2["controller"]:::wk
+    W3["logger"]:::wk
+    EXT["external worker<br/>(separate container)"]:::ext
+
+    SHM[("shared-memory heartbeats<br/>lock-free seqlock, one slot per worker")]
+
+    LOOP["supervisor event loop<br/>timerfd 10 ms tick + signalfd"]
+    SM["state machines<br/>per-worker + system (latched safe state)"]
+    IO["safety I/O<br/>ENABLE GPIO17 · heater PWM GPIO18"]
+    BTN["ack button GPIO27"]
+    WDG["hardware watchdog /dev/watchdog"]
+
+    W1 -- "100 ms" --> SHM
+    W2 --> SHM
+    W3 --> SHM
+    EXT -- "attach" --> SHM
+    SHM -- "read + deadline check (slow path)" --> LOOP
+    W1 -. "SIGCHLD on crash, ~1 us (fast path)" .-> LOOP
+    LOOP --> SM
+    SM -- "de-energize on safe state" --> IO
+    BTN -- "clear latch" --> SM
+    LOOP -- "kick every tick" --> WDG
+    WDG -. "reboots the Pi if the loop hangs" .-> LOOP
+
+    classDef wk fill:#e8f0fe,stroke:#4c8bf5;
+    classDef ext fill:#fef3e0,stroke:#f5a623;
+```
+
+The system models a single-zone thermal controller (the "heater" is a PWM-dimmed
+LED). The load-bearing idea is that the physical process does not stop when the
+software does, so a component must detect that control is untrustworthy within a
+bounded time and drive the outputs to a state that is safe by definition.
+
+1. **Heartbeats (data plane).** Each worker writes a heartbeat -- a 64-bit
+   sequence counter and a `CLOCK_MONOTONIC` timestamp -- into its slot in a
+   shared-memory region every 100 ms. The slot is a **lock-free seqlock**: no
+   mutex, deliberately, because a worker `SIGKILL`ed mid-write must never leave a
+   lock held. One writer, one reader per slot.
+
+2. **Two detection paths.** The supervisor wakes on a 10 ms `timerfd` tick,
+   reads each slot, and compares its age against the deadline. A worker that is
+   *alive but silent* (hung, `SIGSTOP`, or a remote container that stopped) is
+   caught only this way -- in `deadline + tick`. A worker the supervisor
+   *spawned* that crashes is caught far faster: the kernel delivers `SIGCHLD`
+   (folded into the loop via `signalfd`) in microseconds. Same event, two paths,
+   a ~38x latency gap that the [measurements](#results) quantify.
+
+3. **Restart policy.** On failure an owned worker is restarted with exponential
+   backoff, up to a budget within a sliding window. When the budget is spent it
+   gives up and the system escalates. An **external** worker cannot be restarted
+   (the supervisor did not spawn it), so its failure escalates immediately --
+   strictly weaker, which is the point of the [container demo](#containers-spawn-vs-attach).
+
+4. **Two state machines.** A per-worker machine
+   (`Starting → Alive → Failed → Restarting → GaveUp`) and a system machine
+   (`Init → Running → Degraded → SafeState`). Every transition is logged with a
+   monotonic timestamp -- that log is the measurement record.
+
+5. **Latched safe state.** When a worker cannot be recovered the system
+   de-energizes: heater PWM to 0, `ENABLE` line low, and it **latches** there
+   until a human presses the physical ack button. The actuator is owned solely by
+   the supervisor (single point of actuation): a failed worker can never move the
+   output, only cause the supervisor to command a state. Safe state is the
+   *passive* state -- on any reset every GPIO reverts to input, so `ENABLE` falls
+   with an external pull-down even if the code never runs.
+
+6. **Who watches the watcher.** The supervisor kicks a hardware watchdog every
+   tick. If the loop hangs, the kicks stop and the Pi reboots -- and a reset is
+   itself the safe state. This is stronger than a second supervisor process,
+   which would only move the question.
+
+
 ## Status
 - [x] M0 — bring-up: toolchain, CMake, CI, first LED
 - [x] M1 — heartbeat + deadline detection
@@ -121,6 +198,8 @@ contention a stock scheduler can delay it badly, so the tick's own jitter is
 measured (deviation of each wakeup interval from the nominal period, warmup
 excluded) with and without `SCHED_FIFO` + `mlockall` + CPU pinning, and with the
 pinned core isolated via `isolcpus=3`. Reproduce with `scripts/jitter.sh`.
+
+![tick jitter: RT vs baseline](results/jitter.svg)
 
 | configuration | p50 | p99 | p99.9 | max |
 |---|---:|---:|---:|---:|

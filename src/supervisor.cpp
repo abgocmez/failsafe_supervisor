@@ -29,6 +29,7 @@
 #include "failsafe/safety_io.hpp"
 #include "failsafe/shared_memory.hpp"
 #include "failsafe/system_state.hpp"
+#include "failsafe/watchdog.hpp"
 #include "failsafe/worker.hpp"
 
 namespace {
@@ -171,6 +172,10 @@ int main(int argc, char** argv) {
   if (tfd < 0) { std::perror("timerfd_create"); return 2; }
   arm_timer(tfd, tick_ms);
 
+  // Hardware watchdog: kicked every tick while the event loop lives. If the
+  // supervisor hangs, the kicks stop and the Pi reboots (safe by construction).
+  failsafe::Watchdog wdog;
+
   std::printf("supervisor: %zu workers, tick=%ldms\n", workers.size(), tick_ms);
 
   bool run = true;
@@ -214,6 +219,7 @@ int main(int argc, char** argv) {
     if (pfds[1].revents & POLLIN) {
       std::uint64_t exp = 0;
       if (::read(tfd, &exp, sizeof(exp)) < 0 && errno == EINTR) continue;
+      wdog.kick();  // event loop is alive this tick -> pet the hardware watchdog
       const std::uint64_t now = failsafe::now_mono_ns();
 
       for (auto& w : workers) {

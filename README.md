@@ -14,7 +14,7 @@ Goal: inject faults systematically and measure recovery latency per fault class.
 - [x] M1 — heartbeat + deadline detection
 - [x] M2 — restart policy + SIGCHLD fast path
 - [x] M3 — state machines + latched safe state (logic, CI, and on-Pi LED/button verified)
-- [ ] M4 — hardware watchdog
+- [x] M4 — hardware watchdog (BCM /dev/watchdog; SIGSTOP supervisor -> Pi reboots, verified)
 - [ ] M5 — fault injection + measurement
 - [ ] M6 — containers
 
@@ -46,3 +46,26 @@ network partition yields split-brain -- two supervisors each asserting ownership
 of the actuator, which is worse than the fault it was meant to prevent. Doing it
 correctly requires a third node or external arbitration plus fencing; noted as
 future work rather than half-implemented here.
+
+## Hardware watchdog (who watches the watcher)
+
+The supervisor kicks the BCM2835 hardware watchdog (`/dev/watchdog0`) every tick
+while its event loop is alive. If the supervisor hangs or dies, the kicks stop
+and the board reboots after ~15 s; a reset drives every GPIO back to input, so
+ENABLE falls and the heater goes off -- a dead supervisor still converges on the
+safe state. This is the answer to "who supervises the supervisor," and it is
+much stronger than a second supervisor process (which just moves the question).
+
+- Raspberry Pi OS gives systemd the hardware watchdog by default
+  (`RuntimeWatchdogSec=1m`). `scripts/setup-pi.sh` overrides that to 0 so the
+  supervisor can own the device directly; run the supervisor as root.
+- Clean shutdown writes the magic character `V` before closing, disarming the
+  watchdog so stopping the supervisor normally never reboots the box.
+- Kicked in every state including SafeState: the watchdog guards supervisor
+  *liveness*, which is a separate concern from plant safety. A latched SafeState
+  is a handled state, not a hang.
+- Verified on hardware: `SIGSTOP` the supervisor and the Pi reboots ~15 s later
+  (boot id changes, uptime resets).
+- Alternative on a systemd host: run as a service with `WatchdogSec` +
+  `sd_notify(WATCHDOG=1)`, layering app -> systemd -> hardware. Chosen the direct
+  route so the reboot is attributable to our own code and mirrors an MCU IWDG.

@@ -3,10 +3,16 @@ add_test(NAME sanity_runs COMMAND sanity)
 set_tests_properties(sanity_runs PROPERTIES
   PASS_REGULAR_EXPRESSION "sanity OK")
 
-# M1 step 1: seqlock heartbeat stress test (portable; runs in CI too).
+# M1 step 1: in-thread seqlock stress test (portable; runs in CI).
 add_executable(hb_stress hb_stress.cpp)
 target_link_libraries(hb_stress PRIVATE failsafe_headers Threads::Threads)
 add_test(NAME hb_stress COMMAND hb_stress)
 set_tests_properties(hb_stress PROPERTIES
-  PASS_REGULAR_EXPRESSION "hb_stress OK"
-  TIMEOUT 60)
+  PASS_REGULAR_EXPRESSION "hb_stress OK" TIMEOUT 60)
+
+# M1 step 2: cross-process seqlock over shared memory (fork; runs in CI).
+add_executable(shm_fork_stress shm_fork_stress.cpp)
+target_link_libraries(shm_fork_stress PRIVATE failsafe_ipc)
+add_test(NAME shm_fork_stress COMMAND shm_fork_stress)
+set_tests_properties(shm_fork_stress PROPERTIES
+  PASS_REGULAR_EXPRESSION "shm_fork_stress OK" TIMEOUT 60)

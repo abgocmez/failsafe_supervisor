@@ -1,0 +1,22 @@
+name: ci
+on:
+  push:
+  pull_request:
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        preset: [release, asan]
+    steps:
+      - uses: actions/checkout@v4
+      - name: configure
+        run: |
+          EXTRA=""
+          if [ "${{ matrix.preset }}" = "asan" ]; then EXTRA="-DENABLE_ASAN=ON"; fi
+          # HAVE_GPIO OFF: CI x86_64 uzerinde donanimsiz derlenir.
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo $EXTRA
+      - name: build
+        run: cmake --build build
+      - name: test
+        run: ctest --test-dir build --output-on-failure

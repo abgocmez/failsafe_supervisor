@@ -15,8 +15,43 @@ Goal: inject faults systematically and measure recovery latency per fault class.
 - [x] M2 — restart policy + SIGCHLD fast path
 - [x] M3 — state machines + latched safe state (logic, CI, and on-Pi LED/button verified)
 - [x] M4 — hardware watchdog (BCM /dev/watchdog; SIGSTOP supervisor -> Pi reboots, verified)
-- [ ] M5 — fault injection + measurement
+- [x] M5 — fault injection + measurement (3 classes x100; CSV + chart)
 - [ ] M6 — containers
+
+## Results
+
+Each fault class is injected 100 times and the latency is measured in a single
+clock domain: `t0` is `CLOCK_MONOTONIC` (`now_ns`) captured immediately before
+injection, `t1` is the supervisor's structured `EV <mono_ns> ...` event. Because
+every process on the Pi shares `CLOCK_MONOTONIC`, `latency = t1 - t0` is exact.
+Reproduce with `scripts/measure.sh` + `scripts/analyze.py`.
+
+![detection latency by fault class](results/latency.svg)
+
+| fault class | detection path | n | detect p50 | detect p99 | detect max | recover p50 | recover p99 |
+|---|---|---:|---:|---:|---:|---:|---:|
+| crash-stop (SIGKILL) | SIGCHLD | 100 | 1.36 | 1.70 | 1.70 | 216.9 | 221.0 |
+| fail-silent (SIGSTOP) | deadline | 100 | 52.26 | 102.97 | 105.00 | 266.1 | 315.1 |
+| timing / late (300 ms stall) | deadline | 100 | 53.39 | 97.07 | 104.54 | 268.8 | 316.7 |
+
+*(all latencies in ms)*
+
+**What the numbers say.** The two detection paths differ by ~38x in median
+latency, and the difference is structural, not incidental:
+
+- **SIGCHLD (crash-stop)** is phase-independent: the kernel signals the death
+  immediately, so detection is ~1.4 ms with a tight spread (p99 1.70 ms).
+- **Deadline (fail-silent, timing)** is phase-dependent: a fault arrives at a
+  uniformly random point within the heartbeat period, so detection from
+  injection spans `[0, deadline]`. The data matches the theory almost exactly --
+  p50 ~= deadline/2 (52 ms) and p99 ~= deadline + tick (103 ms, with the 100 ms
+  deadline and 10 ms tick). The worst case is `deadline + tick`, not `deadline`,
+  because detection is quantised to the tick; this is stated so the numbers are
+  honest rather than flattering.
+
+Recovery includes the 200 ms restart backoff plus the new worker arming, which
+is why it clusters around 217 ms (crash-stop) and 266 ms (deadline paths).
+
 
 ## Target hardware
 Raspberry Pi 3 B+, Raspberry Pi OS (Debian 13 trixie, aarch64), GCC 14, libgpiod 2.

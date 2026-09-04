@@ -4,3 +4,7 @@ build*/
 *.png
 .cache/
 compile_commands.json
+
+# keep measurement outputs
+!results/latency.csv
+!results/summary.md

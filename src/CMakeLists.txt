@@ -1,5 +1,9 @@
 add_executable(sanity sanity.cpp)
 
+# Monotonic-clock helper for the measurement harness (t0 stamp).
+add_executable(now_ns now_ns.cpp)
+target_link_libraries(now_ns PRIVATE failsafe_headers)
+
 # IPC library: POSIX shared-memory management.
 add_library(failsafe_ipc STATIC shared_memory.cpp)
 target_link_libraries(failsafe_ipc PUBLIC failsafe_headers)
@@ -8,8 +12,7 @@ if(RT_LIB)
   target_link_libraries(failsafe_ipc PUBLIC ${RT_LIB})
 endif()
 
-# Safety-I/O library: real GPIO backend (ENABLE + heater PWM + ack button) on
-# the Pi, logging no-op off-target. Needs threads for the software PWM.
+# Safety-I/O library: real GPIO backend on the Pi, logging no-op off-target.
 add_library(failsafe_hw STATIC safety_io.cpp)
 target_link_libraries(failsafe_hw PUBLIC failsafe_headers Threads::Threads)
 if(HAVE_GPIO)

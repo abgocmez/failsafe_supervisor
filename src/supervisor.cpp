@@ -92,6 +92,10 @@ void handle_failure(failsafe::Worker& w, failsafe::DetectPath path,
       w.state == WorkerState::Restarting) {
     return;
   }
+  // Structured event (monotonic-ns) for the measurement harness.
+  std::printf("EV %llu %s %s\n", (unsigned long long)now,
+              path == failsafe::DetectPath::Sigchld ? "DETECT_SIGCHLD" : "DETECT_DEADLINE",
+              w.spec.name.c_str());
   if (path == failsafe::DetectPath::Sigchld) {
     std::printf("[detect] worker %s failed via SIGCHLD (fast) (lived=%llums seq=%llu)\n",
                 w.spec.name.c_str(), (unsigned long long)(age_ns / 1000000ull),
@@ -110,6 +114,7 @@ void handle_failure(failsafe::Worker& w, failsafe::DetectPath path,
   }
   if (static_cast<int>(w.restart_times.size()) >= w.spec.max_restarts) {
     w.state = WorkerState::GaveUp;
+    std::printf("EV %llu GAVEUP %s\n", (unsigned long long)now, w.spec.name.c_str());
     std::printf("[policy] worker %s GaveUp: %d restarts within window spent\n",
                 w.spec.name.c_str(), w.spec.max_restarts);
     return;
@@ -139,6 +144,11 @@ int main(int argc, char** argv) {
 
   g_worker_path = sibling_path("worker");
 
+  // Restart budget; overridable so the measurement harness can run many
+  // injections without tripping escalation (latency measurement, not policy).
+  const char* mr_env = std::getenv("FAILSAFE_MAX_RESTARTS");
+  const int max_restarts = mr_env ? std::atoi(mr_env) : 3;
+
   std::vector<failsafe::Worker> workers(3);
   const char* names[3] = {"plant", "controller", "logger"};
   for (unsigned i = 0; i < 3; ++i) {
@@ -146,7 +156,7 @@ int main(int argc, char** argv) {
     workers[i].spec.slot = i;
     workers[i].spec.period_ms = 100;
     workers[i].spec.deadline_ns = 100000000ull;
-    workers[i].spec.max_restarts = 3;
+    workers[i].spec.max_restarts = max_restarts;
     workers[i].spec.window_ns = 10000000000ull;
   }
 
@@ -232,6 +242,7 @@ int main(int argc, char** argv) {
             w.consecutive = 0;
             if (w.state == failsafe::WorkerState::Starting) {
               w.state = failsafe::WorkerState::Alive;
+              std::printf("EV %llu ALIVE %s\n", (unsigned long long)now, w.spec.name.c_str());
               std::printf("[state] worker %s -> Alive\n", w.spec.name.c_str());
             }
           }
@@ -291,6 +302,7 @@ int main(int argc, char** argv) {
                     failsafe::to_string(state),
                     (unsigned long long)(now / 1000000ull));
         if (state == failsafe::SystemState::SafeState) {
+          std::printf("EV %llu SAFESTATE -\n", (unsigned long long)now);
           std::printf("[SAFE] heater=0 ENABLE=off latched (ack to clear)\n");
         }
       }

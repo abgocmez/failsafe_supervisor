@@ -7,6 +7,7 @@
 //     explicit ack (physical button or SIGUSR1). Every transition is logged with
 //     a monotonic timestamp -- the M5 measurement record.
 //   argv: supervisor [tick_ms]
+#include <sched.h>       // cpu_set_t / sched_setaffinity (_GNU_SOURCE already set)
 #include <sys/mman.h>
 #include <sys/signalfd.h>
 #include <sys/timerfd.h>
@@ -16,6 +17,7 @@
 #include <unistd.h>
 #include <libgen.h>
 
+#include <algorithm>
 #include <cerrno>
 #include <cmath>
 #include <cstdint>
@@ -140,6 +142,33 @@ void handle_failure(failsafe::Worker& w, failsafe::DetectPath path,
               (unsigned long long)(delay / 1000000ull));
 }
 
+// Real-time tuning (opt-in via FAILSAFE_RT). Best-effort: each step needs
+// privilege and logs whether it took, so a non-root run still works. Reduces
+// tick jitter, especially under load. isolcpus (a kernel cmdline option) is the
+// complement -- it keeps other tasks off the core we pin to.
+void apply_rt_tuning() {
+  if (std::getenv("FAILSAFE_RT") == nullptr) return;
+  if (::mlockall(MCL_CURRENT | MCL_FUTURE) == 0)
+    std::printf("[rt] mlockall: memory locked (no page faults)\n");
+  else std::perror("[rt] mlockall");
+
+  sched_param sp{};
+  sp.sched_priority = 50;
+  if (::sched_setscheduler(0, SCHED_FIFO, &sp) == 0)
+    std::printf("[rt] SCHED_FIFO priority 50\n");
+  else std::perror("[rt] sched_setscheduler");
+
+  if (const char* c = std::getenv("FAILSAFE_CPU")) {
+    const int cpu = std::atoi(c);
+    cpu_set_t set;
+    CPU_ZERO(&set);
+    CPU_SET(cpu, &set);
+    if (::sched_setaffinity(0, sizeof(set), &set) == 0)
+      std::printf("[rt] pinned to CPU %d\n", cpu);
+    else std::perror("[rt] sched_setaffinity");
+  }
+}
+
 // Heater duty while Running: a slow breathe so the LED visibly "runs".
 double breathe(std::uint64_t now) {
   const double t = static_cast<double>(now) / 1e9;
@@ -151,6 +180,7 @@ double breathe(std::uint64_t now) {
 
 int main(int argc, char** argv) {
   std::setvbuf(stdout, nullptr, _IOLBF, 0);
+  apply_rt_tuning();
   const long tick_ms = (argc > 1) ? std::strtol(argv[1], nullptr, 10) : 10;
 
   g_worker_path = sibling_path("worker");
@@ -225,6 +255,16 @@ int main(int argc, char** argv) {
   failsafe::SystemState state = failsafe::SystemState::Init;
   std::uint64_t safe_entered_ns = 0;
 
+  // Tick-jitter measurement (M7): deviation of the actual wakeup interval from
+  // the nominal tick period. Accumulated in memory (no per-tick I/O to perturb
+  // the measurement) and summarised at shutdown.
+  const std::uint64_t tick_period_ns = static_cast<std::uint64_t>(tick_ms) * 1000000ull;
+  std::uint64_t last_tick_ns = 0;
+  std::uint64_t measured_ticks = 0;
+  const std::uint64_t kWarmupTicks = 100;  // skip ~1 s of startup transients
+  std::vector<std::int64_t> jitter_ns;
+  jitter_ns.reserve(100000);
+
   auto find_by_pid = [&](pid_t pid) -> failsafe::Worker* {
     for (auto& w : workers) if (w.pid == pid) return &w;
     return nullptr;
@@ -262,6 +302,11 @@ int main(int argc, char** argv) {
       if (::read(tfd, &exp, sizeof(exp)) < 0 && errno == EINTR) continue;
       wdog.kick();  // event loop is alive this tick -> pet the hardware watchdog
       const std::uint64_t now = failsafe::now_mono_ns();
+
+      if (last_tick_ns != 0 && ++measured_ticks > kWarmupTicks)
+        jitter_ns.push_back(static_cast<std::int64_t>(now - last_tick_ns) -
+                            static_cast<std::int64_t>(tick_period_ns));
+      last_tick_ns = now;
 
       for (auto& w : workers) {
         std::uint64_t s = 0, ts = 0;
@@ -362,6 +407,18 @@ int main(int argc, char** argv) {
           break;
       }
     }
+  }
+
+  // Tick-jitter summary: absolute deviation of the wakeup interval from nominal.
+  if (!jitter_ns.empty()) {
+    std::vector<std::int64_t> a;
+    a.reserve(jitter_ns.size());
+    for (std::int64_t j : jitter_ns) a.push_back(j < 0 ? -j : j);
+    std::sort(a.begin(), a.end());
+    auto q = [&](double p) { return a[static_cast<std::size_t>((a.size() - 1) * p)]; };
+    std::printf("JITTER n=%zu p50=%.1fus p99=%.1fus p99.9=%.1fus max=%.1fus\n",
+                a.size(), q(0.50) / 1000.0, q(0.99) / 1000.0,
+                q(0.999) / 1000.0, static_cast<double>(a.back()) / 1000.0);
   }
 
   std::printf("supervisor: shutting down\n");

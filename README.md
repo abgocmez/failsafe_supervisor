@@ -17,6 +17,7 @@ Goal: inject faults systematically and measure recovery latency per fault class.
 - [x] M4 — hardware watchdog (BCM /dev/watchdog; SIGSTOP supervisor -> Pi reboots, verified)
 - [x] M5 — fault injection + measurement (3 classes x100; CSV + chart)
 - [x] M6 — containers (Docker Compose; spawn-vs-attach asymmetry)
+- [x] M7 — real-time tuning (SCHED_FIFO + mlockall + isolcpus; ~570x lower tick jitter under load)
 
 ## Results
 
@@ -111,6 +112,39 @@ more lenient deadline is the cost of that isolation. The asymmetry is covered by
 `m6_smoke` in CI without Docker. The container image builds off-target
 (`HAVE_GPIO=OFF`, `LogSafetyIo`); GPIO and the watchdog are host-only.
 
+
+
+## Real-time tuning (tick jitter)
+
+The supervisor's guarantees rest on its 10 ms tick firing on time. Under CPU
+contention a stock scheduler can delay it badly, so the tick's own jitter is
+measured (deviation of each wakeup interval from the nominal period, warmup
+excluded) with and without `SCHED_FIFO` + `mlockall` + CPU pinning, and with the
+pinned core isolated via `isolcpus=3`. Reproduce with `scripts/jitter.sh`.
+
+| configuration | p50 | p99 | p99.9 | max |
+|---|---:|---:|---:|---:|
+| baseline, idle | 1.1 us | 36.8 us | 53.9 us | 79 us |
+| RT, idle | 3.2 us | 20.9 us | 26.2 us | 41 us |
+| **baseline, under load** | 0.5 us | **4528 us** | 6532 us | **21987 us** |
+| **RT + isolcpus, under load** | 1.1 us | **7.9 us** | 15.0 us | **46 us** |
+
+*(load = four busy loops saturating all cores; RT run as root, pinned to the
+isolated CPU 3)*
+
+**The point is the load row.** With a stock scheduler under load the 10 ms tick
+is delayed by **4.5 ms at p99 and up to 22 ms worst case** -- enough to blow the
+100 ms detection deadline several times over. `SCHED_FIFO` + `mlockall` +
+pinning to an `isolcpus`-isolated core keeps p99 at **7.9 us** and the worst case
+at **46 us**, a ~570x improvement at p99. Idle, the difference is minor; the
+tuning earns its keep exactly when the box is busy, which is when a failsafe
+supervisor most needs to stay deterministic.
+
+Enable at runtime with `FAILSAFE_RT=1 FAILSAFE_CPU=3` (needs root); isolate the
+core by appending `isolcpus=3` to `/boot/firmware/cmdline.txt` and rebooting. A
+single ~5 ms startup transient (worker spawns) is excluded as warmup; a stock
+kernel still admits rare hardware-interrupt spikes that a PREEMPT_RT kernel and
+IRQ affinity would address further -- noted rather than hidden.
 
 ## Out of scope (deliberate)
 Two-node failover is out of scope: with two nodes you cannot form a quorum, so a

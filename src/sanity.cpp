@@ -1,14 +1,16 @@
-// M0 sanity: heartbeat kaydinin lock-free olacagini ve saat kaynaklarini dogrular.
-// Bu programin gectigi seyler, M1 heartbeat protokolunun on kosullaridir.
+// M0 sanity: verifies the preconditions of the M1 heartbeat protocol.
+// It checks that the heartbeat record will be lock-free, and prints the two
+// clock sources so the MONOTONIC-vs-REALTIME gap is visible.
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
 #include <ctime>
 
 namespace {
-// M1 heartbeat kaydinin cekirdegi: iki 64-bit atomik alan.
-// aarch64 uzerinde bunlar native lock-free olmalidir. Degilse
-// "lock-free" heartbeat iddiasi gecersizdir -> derlemede degil, calismada yakala.
+// Core of the M1 heartbeat record: two 64-bit atomic fields.
+// On aarch64 these must be natively lock-free. If they are not, the
+// "lock-free" heartbeat claim is invalid -- catch it at run time, not
+// at compile time.
 struct HeartbeatCore {
   std::atomic<std::uint64_t> seq;
   std::atomic<std::uint64_t> mono_ns;
@@ -33,13 +35,13 @@ int main() {
   const auto real = now_ns(CLOCK_REALTIME);
   std::printf("CLOCK_MONOTONIC : %llu ns\n", (unsigned long long)mono);
   std::printf("CLOCK_REALTIME  : %llu ns\n", (unsigned long long)real);
-  std::printf("fark (real-mono): %lld s (NTP/RTC etkisi; heartbeat MONOTONIC kullanir)\n",
+  std::printf("gap (real-mono) : %lld s (NTP/RTC effect; heartbeat uses MONOTONIC)\n",
               (long long)((real - mono) / 1000000000ll));
 
   if (!seq_lf || !ts_lf) {
     std::fprintf(stderr,
-        "HATA: 64-bit atomik lock-free degil. 32-bit imaj olabilir; "
-        "heartbeat protokolu bu platformda gecersiz.\n");
+        "ERROR: 64-bit atomics are not lock-free. Likely a 32-bit image; "
+        "the heartbeat protocol is invalid on this platform.\n");
     return 1;
   }
   std::puts("sanity OK");

@@ -11,19 +11,20 @@ endif()
 
 add_compile_options(-Wall -Wextra -Wpedantic)
 
-# --- Sanitizer secenegi (CI kullanir) ---
+# --- Sanitizer option (used by CI) ---
 option(ENABLE_ASAN "AddressSanitizer + UBSan" OFF)
 if(ENABLE_ASAN)
   add_compile_options(-fsanitize=address,undefined -fno-omit-frame-pointer)
   add_link_options(-fsanitize=address,undefined)
 endif()
 
-# --- Donanim arayuzu: Pi disinda (CI) OFF, no-op backend ---
-# BCM watchdog / gpiod yalnizca gercek Pi hedefinde derlenir.
-# Boylece kod x86_64 CI uzerinde de derlenebilir.
-option(HAVE_GPIO "libgpiod ile gercek GPIO backendini derle" OFF)
+# --- Hardware backend: OFF off-target (CI), which selects the no-op path ---
+# BCM watchdog / gpiod are compiled only for the real Pi target, so the code
+# base still builds on x86_64 CI where no such hardware exists.
+option(HAVE_GPIO "Build the real GPIO backend using libgpiod" OFF)
 if(HAVE_GPIO)
-  find_library(GPIOD_LIB gpiod REQUIRED)
+  find_package(PkgConfig REQUIRED)
+  pkg_check_modules(GPIODCXX REQUIRED IMPORTED_TARGET libgpiodcxx>=2.0)
   add_compile_definitions(HAVE_GPIO=1)
 endif()
 

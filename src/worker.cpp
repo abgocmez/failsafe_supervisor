@@ -1,0 +1,57 @@
+// A supervised worker (M1: well-behaved only). It opens the shared region,
+// takes its slot index, and publishes a heartbeat every period using absolute
+// CLOCK_MONOTONIC wakeups (clock_nanosleep TIMER_ABSTIME) so the cadence does
+// not drift. Later milestones add misbehaviour modes (stall, crash, babble).
+//   argv: worker <shm_name> <slot_index> [period_ms]
+#include <csignal>
+#include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <ctime>
+
+#include "failsafe/clock.hpp"
+#include "failsafe/shared_memory.hpp"
+
+namespace {
+volatile std::sig_atomic_t g_run = 1;
+void on_term(int) { g_run = 0; }
+}  // namespace
+
+int main(int argc, char** argv) {
+  if (argc < 3) {
+    std::fprintf(stderr, "usage: %s <shm_name> <slot_index> [period_ms]\n", argv[0]);
+    return 2;
+  }
+  std::setvbuf(stdout, nullptr, _IOLBF, 0);
+  const std::string shm_name = argv[1];
+  const unsigned slot = static_cast<unsigned>(std::strtoul(argv[2], nullptr, 10));
+  const long period_ms = (argc > 3) ? std::strtol(argv[3], nullptr, 10) : 100;
+
+  std::signal(SIGTERM, on_term);
+  std::signal(SIGINT, on_term);
+
+  auto shm = failsafe::SharedMemory::open(shm_name);
+  auto& hb = shm.region()->slots[slot];
+
+  const long period_ns = period_ms * 1000000L;
+  timespec next{};
+  ::clock_gettime(CLOCK_MONOTONIC, &next);
+
+  std::uint64_t seq = 0;
+  while (g_run) {
+    hb.publish(++seq, failsafe::now_mono_ns());
+
+    next.tv_nsec += period_ns;
+    while (next.tv_nsec >= 1000000000L) {
+      next.tv_nsec -= 1000000000L;
+      next.tv_sec += 1;
+    }
+    // Absolute sleep: no accumulating drift, and it re-targets even if a beat
+    // was late. EINTR (a signal) just falls through to the g_run check.
+    ::clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &next, nullptr);
+  }
+  std::printf("worker[slot %u]: exiting after %llu beats\n", slot,
+              (unsigned long long)seq);
+  return 0;
+}

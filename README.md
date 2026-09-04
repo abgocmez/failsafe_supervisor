@@ -11,7 +11,7 @@ Goal: inject faults systematically and measure recovery latency per fault class.
 
 ## Status
 - [x] M0 — bring-up: toolchain, CMake, CI, first LED
-- [ ] M1 — heartbeat + deadline detection
+- [x] M1 — heartbeat + deadline detection
 - [ ] M2 — restart policy + SIGCHLD fast path
 - [ ] M3 — state machines + real safe state (GPIO)
 - [ ] M4 — hardware watchdog

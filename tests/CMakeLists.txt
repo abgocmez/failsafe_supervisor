@@ -16,3 +16,10 @@ target_link_libraries(shm_fork_stress PRIVATE failsafe_ipc)
 add_test(NAME shm_fork_stress COMMAND shm_fork_stress)
 set_tests_properties(shm_fork_stress PROPERTIES
   PASS_REGULAR_EXPRESSION "shm_fork_stress OK" TIMEOUT 60)
+
+# M1 integration: end-to-end deadline detection (spawns supervisor + worker).
+add_test(NAME m1_smoke
+  COMMAND ${CMAKE_COMMAND} -E env bash
+          ${CMAKE_CURRENT_SOURCE_DIR}/m1_smoke.sh $<TARGET_FILE:supervisor>)
+set_tests_properties(m1_smoke PROPERTIES
+  PASS_REGULAR_EXPRESSION "m1_smoke OK" TIMEOUT 30)

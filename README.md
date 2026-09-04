@@ -13,7 +13,7 @@ Goal: inject faults systematically and measure recovery latency per fault class.
 - [x] M0 — bring-up: toolchain, CMake, CI, first LED
 - [x] M1 — heartbeat + deadline detection
 - [x] M2 — restart policy + SIGCHLD fast path
-- [~] M3 — state machines + latched safe state (logic + CI verified; on-Pi LED/button visual check pending)
+- [x] M3 — state machines + latched safe state (logic, CI, and on-Pi LED/button verified)
 - [ ] M4 — hardware watchdog
 - [ ] M5 — fault injection + measurement
 - [ ] M6 — containers

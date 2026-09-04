@@ -8,9 +8,10 @@ if(RT_LIB)
   target_link_libraries(failsafe_ipc PUBLIC ${RT_LIB})
 endif()
 
-# Hardware/output library: real GPIO backend on the Pi, log no-op off-target.
-add_library(failsafe_hw STATIC status_output.cpp)
-target_link_libraries(failsafe_hw PUBLIC failsafe_headers)
+# Safety-I/O library: real GPIO backend (ENABLE + heater PWM + ack button) on
+# the Pi, logging no-op off-target. Needs threads for the software PWM.
+add_library(failsafe_hw STATIC safety_io.cpp)
+target_link_libraries(failsafe_hw PUBLIC failsafe_headers Threads::Threads)
 if(HAVE_GPIO)
   target_link_libraries(failsafe_hw PRIVATE PkgConfig::GPIODCXX)
 endif()

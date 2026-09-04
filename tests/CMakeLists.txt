@@ -30,3 +30,10 @@ add_test(NAME m2_smoke
           ${CMAKE_CURRENT_SOURCE_DIR}/m2_smoke.sh $<TARGET_FILE:supervisor>)
 set_tests_properties(m2_smoke PROPERTIES
   PASS_REGULAR_EXPRESSION "m2_smoke OK" TIMEOUT 40)
+
+# M3 integration: system state machine + latched safe state + ack (spawns supervisor).
+add_test(NAME m3_smoke
+  COMMAND ${CMAKE_COMMAND} -E env bash
+          ${CMAKE_CURRENT_SOURCE_DIR}/m3_smoke.sh $<TARGET_FILE:supervisor>)
+set_tests_properties(m3_smoke PROPERTIES
+  PASS_REGULAR_EXPRESSION "m3_smoke OK" TIMEOUT 40)

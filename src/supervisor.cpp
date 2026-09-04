@@ -1,13 +1,11 @@
-// Failsafe supervisor (M2): supervises N workers with two detection paths and a
-// budgeted restart policy.
-//   * SIGCHLD (fast path): a worker we spawned dies -> the kernel signals us in
-//     microseconds, folded into the poll loop via signalfd.
-//   * Deadline (slow path): a worker is alive but silent (hang / SIGSTOP) -> we
-//     find out only when its heartbeat ages past the deadline (~deadline + tick).
-// On failure a worker is restarted with exponential backoff, up to a budget in a
-// sliding window; when the budget is spent it enters GaveUp and the supervisor
-// escalates (drives the status output unhealthy). The latched safe-state machine
-// and the hardware watchdog come in M3/M4.
+// Failsafe supervisor (M3): M2 plus the system-level state machine and a real,
+// latched safe state driven onto the safety I/O.
+//   * SIGCHLD fast path + deadline slow path detection (M2).
+//   * Budgeted restart with exponential backoff (M2).
+//   * System state machine Init/Running/Degraded/SafeState. A worker that gives
+//     up drives the system to SafeState: heater 0, ENABLE off, LATCHED until an
+//     explicit ack (physical button or SIGUSR1). Every transition is logged with
+//     a monotonic timestamp -- the M5 measurement record.
 //   argv: supervisor [tick_ms]
 #include <sys/mman.h>
 #include <sys/signalfd.h>
@@ -19,6 +17,7 @@
 #include <libgen.h>
 
 #include <cerrno>
+#include <cmath>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -27,8 +26,9 @@
 #include <vector>
 
 #include "failsafe/clock.hpp"
+#include "failsafe/safety_io.hpp"
 #include "failsafe/shared_memory.hpp"
-#include "failsafe/status_output.hpp"
+#include "failsafe/system_state.hpp"
 #include "failsafe/worker.hpp"
 
 namespace {
@@ -36,7 +36,6 @@ namespace {
 std::string g_worker_path;
 std::string g_shm_name;
 
-// Exponential backoff: 200 ms doubling per consecutive failure, capped at 3 s.
 std::uint64_t backoff_ns(int consecutive) {
   const std::uint64_t base = 200000000ull;   // 200 ms
   const std::uint64_t cap = 3000000000ull;   // 3 s
@@ -62,8 +61,6 @@ void arm_timer(int fd, long tick_ms) {
   ::timerfd_settime(fd, 0, &its, nullptr);
 }
 
-// Fork/exec one worker instance. Resets the inherited (blocked) signal mask in
-// the child so the worker actually receives SIGTERM/SIGINT.
 bool spawn(failsafe::Worker& w) {
   const pid_t pid = ::fork();
   if (pid < 0) { std::perror("fork"); return false; }
@@ -73,7 +70,7 @@ bool spawn(failsafe::Worker& w) {
     ::sigprocmask(SIG_SETMASK, &empty, nullptr);
     const std::string slot = std::to_string(w.spec.slot);
     const std::string per = std::to_string(w.spec.period_ms);
-    const std::string pname = "fsw-" + w.spec.name;  // distinct comm per worker
+    const std::string pname = "fsw-" + w.spec.name;
     ::execl(g_worker_path.c_str(), pname.c_str(), g_shm_name.c_str(), slot.c_str(),
             per.c_str(), pname.c_str(), static_cast<char*>(nullptr));
     std::perror("execl");
@@ -82,21 +79,18 @@ bool spawn(failsafe::Worker& w) {
   w.pid = pid;
   w.state = failsafe::WorkerState::Starting;
   w.armed = false;
-  w.last_seq = 0;                       // new instance restarts its seq at 1
+  w.last_seq = 0;
   w.spawn_mono_ns = failsafe::now_mono_ns();
   return true;
 }
 
-// Move a worker into Failed and decide restart vs give-up (budget in window).
 void handle_failure(failsafe::Worker& w, failsafe::DetectPath path,
                     std::uint64_t now, std::uint64_t age_ns) {
   using failsafe::WorkerState;
   if (w.state == WorkerState::Failed || w.state == WorkerState::GaveUp ||
       w.state == WorkerState::Restarting) {
-    return;  // already handled
+    return;
   }
-  // For SIGCHLD the metric is the crashed instance's lifetime; for the deadline
-  // path it is the heartbeat age (the actual detection latency vs the deadline).
   if (path == failsafe::DetectPath::Sigchld) {
     std::printf("[detect] worker %s failed via SIGCHLD (fast) (lived=%llums seq=%llu)\n",
                 w.spec.name.c_str(), (unsigned long long)(age_ns / 1000000ull),
@@ -115,7 +109,7 @@ void handle_failure(failsafe::Worker& w, failsafe::DetectPath path,
   }
   if (static_cast<int>(w.restart_times.size()) >= w.spec.max_restarts) {
     w.state = WorkerState::GaveUp;
-    std::printf("[policy] worker %s GaveUp: %d restarts within window spent -> ESCALATE\n",
+    std::printf("[policy] worker %s GaveUp: %d restarts within window spent\n",
                 w.spec.name.c_str(), w.spec.max_restarts);
     return;
   }
@@ -127,6 +121,13 @@ void handle_failure(failsafe::Worker& w, failsafe::DetectPath path,
   std::printf("[policy] worker %s restart #%d scheduled in %llums (backoff)\n",
               w.spec.name.c_str(), static_cast<int>(w.restart_times.size()),
               (unsigned long long)(delay / 1000000ull));
+}
+
+// Heater duty while Running: a slow breathe so the LED visibly "runs".
+double breathe(std::uint64_t now) {
+  const double t = static_cast<double>(now) / 1e9;
+  const double s = (std::sin(t * 2.0 * 3.14159265 * 0.3) + 1.0) * 0.5;  // 0.3 Hz
+  return 0.1 + 0.9 * s;
 }
 
 }  // namespace
@@ -153,10 +154,8 @@ int main(int argc, char** argv) {
   sigaddset(&mask, SIGCHLD);
   sigaddset(&mask, SIGTERM);
   sigaddset(&mask, SIGINT);
+  sigaddset(&mask, SIGUSR1);  // alternate ack source (headless / CI)
   ::sigprocmask(SIG_BLOCK, &mask, nullptr);
-  // SFD_NONBLOCK is essential: the drain loop below reads until EAGAIN. Without
-  // it, the second read blocks until the next signal, stalling the whole event
-  // loop (timerfd ticks stop, restarts never fire).
   const int sfd = ::signalfd(-1, &mask, SFD_NONBLOCK | SFD_CLOEXEC);
   if (sfd < 0) { std::perror("signalfd"); return 2; }
 
@@ -167,7 +166,7 @@ int main(int argc, char** argv) {
 
   for (auto& w : workers) spawn(w);
 
-  auto out = failsafe::make_status_output();
+  auto io = failsafe::make_safety_io();
   const int tfd = ::timerfd_create(CLOCK_MONOTONIC, TFD_CLOEXEC);
   if (tfd < 0) { std::perror("timerfd_create"); return 2; }
   arm_timer(tfd, tick_ms);
@@ -176,7 +175,9 @@ int main(int argc, char** argv) {
 
   bool run = true;
   bool shutting_down = false;
-  bool escalated = false;
+  bool ack_pending = false;
+  failsafe::SystemState state = failsafe::SystemState::Init;
+  std::uint64_t safe_entered_ns = 0;
 
   auto find_by_pid = [&](pid_t pid) -> failsafe::Worker* {
     for (auto& w : workers) if (w.pid == pid) return &w;
@@ -193,6 +194,8 @@ int main(int argc, char** argv) {
       while (::read(sfd, &si, sizeof(si)) == sizeof(si)) {
         if (si.ssi_signo == SIGTERM || si.ssi_signo == SIGINT) {
           run = false;
+        } else if (si.ssi_signo == SIGUSR1) {
+          ack_pending = true;
         } else if (si.ssi_signo == SIGCHLD) {
           int status = 0;
           pid_t pid;
@@ -241,12 +244,70 @@ int main(int argc, char** argv) {
         }
       }
 
-      bool all_alive = true;
+      // Aggregate worker view.
+      bool any_gaveup = false, all_alive = true;
       for (const auto& w : workers) {
-        if (w.state == failsafe::WorkerState::GaveUp) escalated = true;
+        if (w.state == failsafe::WorkerState::GaveUp) any_gaveup = true;
         if (w.state != failsafe::WorkerState::Alive) all_alive = false;
       }
-      out->set_healthy(all_alive && !escalated);
+
+      // Ack from either source, consumed once.
+      const bool ack = ack_pending || io->ack_edge();
+      ack_pending = false;
+
+      // --- System state machine ---
+      const failsafe::SystemState prev = state;
+      if (state != failsafe::SystemState::SafeState) {
+        if (any_gaveup) {
+          state = failsafe::SystemState::SafeState;
+          safe_entered_ns = now;
+        } else if (all_alive) {
+          state = failsafe::SystemState::Running;
+        } else {
+          state = failsafe::SystemState::Degraded;
+        }
+      } else if (ack) {
+        // Latched safe state cleared by a human. Re-arm the workers that gave up.
+        for (auto& w : workers) {
+          if (w.state == failsafe::WorkerState::GaveUp) {
+            w.restart_times.clear();
+            w.consecutive = 0;
+            spawn(w);
+          }
+        }
+        std::printf("[ack] safe state cleared after %llums, re-arming workers\n",
+                    (unsigned long long)((now - safe_entered_ns) / 1000000ull));
+        state = failsafe::SystemState::Init;
+      }
+
+      if (state != prev) {
+        std::printf("[SYSTEM] %s -> %s (t=%llums)\n", failsafe::to_string(prev),
+                    failsafe::to_string(state),
+                    (unsigned long long)(now / 1000000ull));
+        if (state == failsafe::SystemState::SafeState) {
+          std::printf("[SAFE] heater=0 ENABLE=off latched (ack to clear)\n");
+        }
+      }
+
+      // --- Drive the safety I/O from the state ---
+      switch (state) {
+        case failsafe::SystemState::Running:
+          io->set_enable(true);
+          io->set_heater(breathe(now));
+          break;
+        case failsafe::SystemState::Degraded:
+          io->set_enable(true);
+          io->set_heater(0.15);  // reduced while recovering
+          break;
+        case failsafe::SystemState::Init:
+          io->set_enable(true);
+          io->set_heater(0.0);
+          break;
+        case failsafe::SystemState::SafeState:
+          io->set_enable(false);
+          io->set_heater(0.0);
+          break;
+      }
     }
   }
 
@@ -254,7 +315,8 @@ int main(int argc, char** argv) {
   shutting_down = true;
   for (auto& w : workers) if (w.pid > 0) ::kill(w.pid, SIGTERM);
   for (auto& w : workers) if (w.pid > 0) ::waitpid(w.pid, nullptr, 0);
-  out->set_healthy(false);
+  io->set_enable(false);
+  io->set_heater(0.0);
   ::close(tfd);
   ::close(sfd);
   return 0;
